@@ -2,25 +2,25 @@ using System.Net;
 using System.Net.Sockets;
 using JT1078.Protocol;
 using JT1078.Protocol.Enums;
-using JT1078.Flv;
 
 namespace JT1078.Gateway;
 
 /// <summary>
 /// TCP listener the camera pushes its JT/T 1078 stream to (after the platform
 /// sends it 0x9101). Frames packets on the 0x30 0x31 0x63 0x64 marker, parses +
-/// merges them, encodes to FLV, and hands the FLV tags to the StreamManager.
+/// merges them into complete video frames, and feeds the raw H.265 Annex-B
+/// elementary stream into FFmpeg (per stream key) to transcode -> H.264 HLS.
 /// </summary>
 public class TcpIngest
 {
     private static readonly byte[] Magic = { 0x30, 0x31, 0x63, 0x64 };
-    private readonly StreamManager _mgr;
+    private readonly FfmpegTranscoder _ff;
     private readonly int _port;
     private readonly ILogger _log;
 
-    public TcpIngest(StreamManager mgr, int port, ILogger log)
+    public TcpIngest(FfmpegTranscoder ff, int port, ILogger log)
     {
-        _mgr = mgr; _port = port; _log = log;
+        _ff = ff; _port = port; _log = log;
     }
 
     public void Start()
@@ -46,8 +46,7 @@ public class TcpIngest
     {
         var remote = client.Client.RemoteEndPoint?.ToString();
         _log.LogInformation("[INGEST] camera connected {r}", remote);
-        var encoders = new Dictionary<string, FlvEncoder>();
-        var headered = new HashSet<string>();
+        var streamKeys = new HashSet<string>();   // keys this connection produced (to stop on disconnect)
         var buffer = new List<byte>();
         var readBuf = new byte[65536];
 
@@ -56,9 +55,9 @@ public class TcpIngest
             audioPkts = 0, errors = 0; bool firstChunkLogged = false;
         string lastErr = ""; var dataTypes = new HashSet<string>(); var subTypes = new HashSet<string>();
         var stats = new IngestStats(() =>
-            _log.LogInformation("[DIAG] {r} bytes={b} pkts={p} video={v} audio={a} mergeNull={m} errors={e} dataTypes=[{dt}] subTypes=[{st}] lastErr={le}",
+            _log.LogInformation("[DIAG] {r} bytes={b} pkts={p} video={v} audio={a} mergeNull={m} errors={e} dataTypes=[{dt}] subTypes=[{st}] keys=[{k}] lastErr={le}",
                 remote, totalBytes, totalPkts, videoPkts, audioPkts, mergeNull, errors,
-                string.Join(",", dataTypes), string.Join(",", subTypes), lastErr));
+                string.Join(",", dataTypes), string.Join(",", subTypes), string.Join(",", streamKeys), lastErr));
 
         try
         {
@@ -74,7 +73,7 @@ public class TcpIngest
                     firstChunkLogged = true;
                 }
                 for (int i = 0; i < n; i++) buffer.Add(readBuf[i]);
-                Process(buffer, encoders, headered, remote,
+                Process(buffer, streamKeys, remote,
                     ref totalPkts, ref mergeNull, ref videoPkts, ref audioPkts, ref errors, ref lastErr, dataTypes, subTypes);
                 stats.MaybeLog(totalPkts, totalBytes);
             }
@@ -83,12 +82,13 @@ public class TcpIngest
         finally
         {
             client.Close();
-            _log.LogInformation("[INGEST] camera disconnected {r} | bytes={b} pkts={p} video={v} audio={a} mergeNull={m} errors={e} dataTypes=[{dt}] lastErr={le}",
-                remote, totalBytes, totalPkts, videoPkts, audioPkts, mergeNull, errors, string.Join(",", dataTypes), lastErr);
+            _ff.StopAll(streamKeys);
+            _log.LogInformation("[INGEST] camera disconnected {r} | bytes={b} pkts={p} video={v} audio={a} mergeNull={m} errors={e} dataTypes=[{dt}] keys=[{k}] lastErr={le}",
+                remote, totalBytes, totalPkts, videoPkts, audioPkts, mergeNull, errors, string.Join(",", dataTypes), string.Join(",", streamKeys), lastErr);
         }
     }
 
-    private void Process(List<byte> buf, Dictionary<string, FlvEncoder> encoders, HashSet<string> headered, string remote,
+    private void Process(List<byte> buf, HashSet<string> streamKeys, string remote,
         ref int totalPkts, ref int mergeNull, ref int videoPkts, ref int audioPkts, ref int errors, ref string lastErr,
         HashSet<string> dataTypes, HashSet<string> subTypes)
     {
@@ -105,11 +105,11 @@ public class TcpIngest
             var pkt = buf.GetRange(start, next - start).ToArray();
             buf.RemoveRange(0, next);
             totalPkts++;
-            Handle(pkt, encoders, headered, remote, ref mergeNull, ref videoPkts, ref audioPkts, ref errors, ref lastErr, dataTypes, subTypes);
+            Handle(pkt, streamKeys, remote, ref mergeNull, ref videoPkts, ref audioPkts, ref errors, ref lastErr, dataTypes, subTypes);
         }
     }
 
-    private void Handle(byte[] bytes, Dictionary<string, FlvEncoder> encoders, HashSet<string> headered, string remote,
+    private void Handle(byte[] bytes, HashSet<string> streamKeys, string remote,
         ref int mergeNull, ref int videoPkts, ref int audioPkts, ref int errors, ref string lastErr,
         HashSet<string> dataTypes, HashSet<string> subTypes)
     {
@@ -124,24 +124,13 @@ public class TcpIngest
             if (full.Label3.DataType == JT1078DataType.音频帧) { audioPkts++; return; }
             videoPkts++;
 
-            string key = full.GetAVKey();
-            if (!encoders.TryGetValue(key, out var enc)) { enc = new FlvEncoder(); encoders[key] = enc; }
+            if (full.Bodies == null || full.Bodies.Length == 0) return;
 
-            if (!headered.Contains(key))
-            {
-                var header = enc.EncoderVideoTag(full, true);
-                if (header != null)
-                {
-                    _mgr.SetHeader(key, header);
-                    headered.Add(key);
-                    _log.LogInformation("[INGEST] LIVE stream key={k} from {r}", key, remote);
-                }
-            }
-            else
-            {
-                var tag = enc.EncoderVideoTag(full, false);
-                if (tag != null) _mgr.Push(key, tag);
-            }
+            string key = full.GetAVKey();
+            if (streamKeys.Add(key))
+                _log.LogInformation("[INGEST] LIVE stream key={k} from {r} -> transcoding H.265->H.264 HLS", key, remote);
+
+            _ff.Feed(key, full.Bodies);
         }
         catch (Exception ex) { errors++; lastErr = ex.Message; }
     }
@@ -155,7 +144,7 @@ public class TcpIngest
     }
 }
 
-/// <summary>Logs a diagnostic summary at most once every ~2s of activity.</summary>
+/// <summary>Logs a diagnostic summary at most once every ~100 packets.</summary>
 public class IngestStats
 {
     private readonly Action _log;

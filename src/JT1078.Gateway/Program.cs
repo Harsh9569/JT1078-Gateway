@@ -1,25 +1,39 @@
 using JT1078.Gateway;
+using Microsoft.AspNetCore.StaticFiles;
 
 var builder = WebApplication.CreateBuilder(args);
-builder.Services.AddSingleton<StreamManager>();
 var app = builder.Build();
 
 int ingestPort = int.Parse(builder.Configuration["IngestPort"] ?? "2272");
-var mgr = app.Services.GetRequiredService<StreamManager>();
-new TcpIngest(mgr, ingestPort, app.Logger).Start();
+string ffmpegPath = builder.Configuration["FfmpegPath"] ?? "ffmpeg";
+
+// HLS output lives under wwwroot/live so the static file middleware serves it.
+string webRoot = app.Environment.WebRootPath
+                 ?? Path.Combine(AppContext.BaseDirectory, "wwwroot");
+string hlsDir = Path.Combine(webRoot, "live");
+
+var transcoder = new FfmpegTranscoder(ffmpegPath, hlsDir, app.Logger);
+new TcpIngest(transcoder, ingestPort, app.Logger).Start();
+
+// serve .m3u8 / .ts with the right content types (not in the default map)
+var contentTypes = new FileExtensionContentTypeProvider();
+contentTypes.Mappings[".m3u8"] = "application/vnd.apple.mpegurl";
+contentTypes.Mappings[".ts"] = "video/mp2t";
 
 app.UseDefaultFiles();   // serve wwwroot/index.html at /
-app.UseStaticFiles();
-
-// HTTP-FLV playback:  GET /live/{SIM}_{channel}.flv
-app.MapGet("/live/{key}.flv", async (string key, HttpContext ctx, StreamManager m) =>
+app.UseStaticFiles(new StaticFileOptions
 {
-    ctx.Response.Headers["Content-Type"] = "video/x-flv";
-    ctx.Response.Headers["Cache-Control"] = "no-cache";
-    await m.Subscribe(key, ctx.Response.Body, ctx.RequestAborted);
+    ContentTypeProvider = contentTypes,
+    OnPrepareResponse = ctx =>
+    {
+        // playlists must never be cached; segments are fine to cache briefly
+        if (ctx.File.Name.EndsWith(".m3u8"))
+            ctx.Context.Response.Headers["Cache-Control"] = "no-cache, no-store";
+        ctx.Context.Response.Headers["Access-Control-Allow-Origin"] = "*";
+    }
 });
 
-// list active streams (handy for debugging the exact key)
-app.MapGet("/streams", (StreamManager m) => Results.Json(m.ListKeys()));
+// list active (transcoding) stream keys — handy for finding the exact key
+app.MapGet("/streams", () => Results.Json(transcoder.ActiveKeys()));
 
 app.Run();
