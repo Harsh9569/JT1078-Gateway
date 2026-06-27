@@ -1,0 +1,38 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>JT1078 Live</title>
+  <script src="https://cdn.jsdelivr.net/npm/mpegts.js@latest/dist/mpegts.js"></script>
+</head>
+<body style="background:#111;color:#eee;font-family:sans-serif;padding:16px">
+  <h3>JT1078 Live Test</h3>
+  <p>Stream key = <code>{SIM}_{channel}</code> — check the gateway console log line <code>[INGEST] LIVE stream key=...</code></p>
+  <input id="key" value="2080310569_1" style="width:280px;padding:4px">
+  <button onclick="play()" style="padding:4px 10px">Play</button>
+  <button onclick="streams()" style="padding:4px 10px">List streams</button>
+  <div style="margin-top:8px">
+    <video id="v" controls autoplay muted style="width:760px;max-width:95vw;background:#000"></video>
+  </div>
+  <pre id="out" style="color:#9f9"></pre>
+  <script>
+    let p;
+    function play() {
+      if (p) { p.destroy(); p = null; }
+      const key = document.getElementById('key').value.trim();
+      const v = document.getElementById('v');
+      p = mpegts.createPlayer(
+        { type: 'flv', isLive: true, url: `/live/${key}.flv` },
+        { enableStashBuffer: false, liveBufferLatencyChasing: true }
+      );
+      p.attachMediaElement(v);
+      p.load();
+      p.play();
+    }
+    async function streams() {
+      const r = await fetch('/streams');
+      document.getElementById('out').textContent = 'active streams: ' + await r.text();
+    }
+  </script>
+</body>
+</html>

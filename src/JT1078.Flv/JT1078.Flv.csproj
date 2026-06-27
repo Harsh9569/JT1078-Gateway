@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <Import Project="..\Info.props" />
+  <ItemGroup>
+    <ProjectReference Include="..\JT1078.Protocol\JT1078.Protocol.csproj" />
+  </ItemGroup>
+</Project>

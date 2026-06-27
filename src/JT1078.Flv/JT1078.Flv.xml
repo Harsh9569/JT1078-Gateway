@@ -1,0 +1,394 @@
+<?xml version="1.0"?>
+<doc>
+    <assembly>
+        <name>JT1078.Flv</name>
+    </assembly>
+    <members>
+        <member name="T:JT1078.Flv.FlvBufferWriter">
+            <summary>
+            <see cref="!:System.Buffers.Writer"/>
+            </summary>
+        </member>
+        <member name="T:JT1078.Flv.Enums.AACPacketType">
+            <summary>
+            Aac tag-body数据包类型
+            </summary>
+        </member>
+        <member name="F:JT1078.Flv.Enums.AACPacketType.AudioSpecificConfig">
+            <summary>
+            音频序列配置
+            </summary>
+        </member>
+        <member name="F:JT1078.Flv.Enums.AACPacketType.AudioFrame">
+            <summary>
+            音频帧
+            </summary>
+        </member>
+        <member name="T:JT1078.Flv.Enums.AudioFormat">
+            <summary>
+            音频格式
+            </summary>
+        </member>
+        <member name="F:JT1078.Flv.Enums.AudioFormat.Pcm_Platform">
+            <summary>
+            Linear PCM, platform endian
+            </summary>
+        </member>
+        <member name="F:JT1078.Flv.Enums.AudioFormat.ADPCM">
+            <summary>
+            ADPCM
+            </summary>
+        </member>
+        <member name="F:JT1078.Flv.Enums.AudioFormat.MP3">
+            <summary>
+            MP3
+            </summary>
+        </member>
+        <member name="F:JT1078.Flv.Enums.AudioFormat.Pcm_Little">
+            <summary>
+            Linear PCM, little endian
+            </summary>
+        </member>
+        <member name="F:JT1078.Flv.Enums.AudioFormat.Nellymoser_16Khz">
+            <summary>
+             16-kHz mono
+            </summary>
+        </member>
+        <member name="F:JT1078.Flv.Enums.AudioFormat.Nellymoser_8Khz">
+            <summary>
+             8-kHz mono
+            </summary>
+        </member>
+        <member name="F:JT1078.Flv.Enums.AudioFormat.Nellymoser">
+            <summary>
+            Nellymoser
+            </summary>
+        </member>
+        <member name="F:JT1078.Flv.Enums.AudioFormat.G711_A_law">
+            <summary>
+             A-law logarithmic PCM
+            </summary>
+        </member>
+        <member name="F:JT1078.Flv.Enums.AudioFormat.G711_mu_law">
+            <summary>
+            mu-law logarithmic PCM
+            </summary>
+        </member>
+        <member name="F:JT1078.Flv.Enums.AudioFormat.AAC">
+            <summary>
+            AAC
+            </summary>
+        </member>
+        <member name="F:JT1078.Flv.Enums.AudioFormat.Speex">
+            <summary>
+            Speex
+            </summary>
+        </member>
+        <member name="F:JT1078.Flv.Enums.AudioFormat.MP3_8Khz">
+            <summary>
+            MP3 8-Khz
+            </summary>
+        </member>
+        <member name="T:JT1078.Flv.Enums.ChannelType">
+            <summary>
+            声道类型
+            </summary>
+        </member>
+        <member name="F:JT1078.Flv.Enums.ChannelType.Mono">
+            <summary>
+            单声道
+            </summary>
+        </member>
+        <member name="F:JT1078.Flv.Enums.ChannelType.Stereo">
+            <summary>
+            立体声
+            </summary>
+        </member>
+        <member name="F:JT1078.Flv.Enums.FrameType.KeyFrame">
+            <summary>
+            ‭00010000‬
+            </summary>
+        </member>
+        <member name="F:JT1078.Flv.Enums.FrameType.InterFrame">
+            <summary>
+            ‭00100000‬
+            </summary>
+        </member>
+        <member name="F:JT1078.Flv.Enums.FrameType.DisposableInterFrame">
+            <summary>
+            ‭00110000‬
+            </summary>
+        </member>
+        <member name="F:JT1078.Flv.Enums.FrameType.GeneratedKeyFrame">
+            <summary>
+            01000000
+            </summary>
+        </member>
+        <member name="F:JT1078.Flv.Enums.FrameType.VideoInfoOrCommandFrame">
+            <summary>
+            01010000
+            </summary>
+        </member>
+        <member name="T:JT1078.Flv.Enums.SampleBit">
+            <summary>
+            采样位深
+            </summary>
+        </member>
+        <member name="F:JT1078.Flv.Enums.SampleBit.Bit_8">
+            <summary>
+            8位
+            </summary>
+        </member>
+        <member name="F:JT1078.Flv.Enums.SampleBit.Bit_16">
+            <summary>
+            16位
+            </summary>
+        </member>
+        <member name="T:JT1078.Flv.Extensions.HexExtensions">
+            <summary>
+            
+            ref:"www.codeproject.com/tips/447938/high-performance-csharp-byte-array-to-hex-string-t"
+            </summary>
+        </member>
+        <member name="M:JT1078.Flv.Extensions.HexExtensions.ToHexBytes(System.String)">
+            <summary>
+            16进制字符串转16进制数组
+            </summary>
+            <param name="hexString"></param>
+            <param name="separator"></param>
+            <returns></returns>
+        </member>
+        <member name="T:JT1078.Flv.FlvEncoder">
+            <summary>
+            Flv编码器
+            一个客户端对应一个实例
+            <para>
+            当实例不适用时，尽量手动调用下<see cref="!:Dispose"/>
+            </para>
+            
+            手动编码
+            0、<see cref="M:JT1078.Flv.FlvEncoder.EncoderFlvHeader(System.Boolean,System.Boolean)"/>
+            1、插入  PriviousTagSize =0  always equal 0
+            2、<see cref="M:JT1078.Flv.FlvEncoder.EncoderScriptTag(JT1078.Protocol.MessagePack.SPSInfo,System.Boolean,System.Double)"/>
+            3、<see cref="M:JT1078.Flv.FlvEncoder.EncoderFirstVideoTag(JT1078.Protocol.MessagePack.SPSInfo,JT1078.Protocol.H264.H264NALU,JT1078.Protocol.H264.H264NALU,JT1078.Protocol.H264.H264NALU)"/>
+            4、<see cref="M:JT1078.Flv.FlvEncoder.EncoderFirstAudioTag(System.UInt64)"/>
+            5、<see cref="M:JT1078.Flv.FlvEncoder.EncoderVideoTag(JT1078.Protocol.JT1078Package,System.Boolean)"/>第二个参数传false
+            6、<see cref="M:JT1078.Flv.FlvEncoder.EncoderAudioTag(JT1078.Protocol.JT1078Package,System.Boolean)"/>第二个参数传false
+            自动编码
+            1、<see cref="M:JT1078.Flv.FlvEncoder.EncoderFlvHeader(System.Boolean,System.Boolean)"/>
+            2、<see cref="M:JT1078.Flv.FlvEncoder.EncoderScriptTag(JT1078.Protocol.MessagePack.SPSInfo,System.Boolean,System.Double)"/>
+            3、<see cref="M:JT1078.Flv.FlvEncoder.EncoderVideoTag(JT1078.Protocol.JT1078Package,System.Boolean)"/>第二个参数传true
+            4、<see cref="M:JT1078.Flv.FlvEncoder.EncoderAudioTag(JT1078.Protocol.JT1078Package,System.Boolean)"/>第二个参数传true
+            </summary>
+        </member>
+        <member name="M:JT1078.Flv.FlvEncoder.#ctor">
+            <summary>
+            
+            </summary>
+        </member>
+        <member name="M:JT1078.Flv.FlvEncoder.EncoderFlvHeader(System.Boolean,System.Boolean)">
+            <summary>
+            编码flv头
+            </summary>
+            <param name="hasVideo">是否有视频</param>
+            <param name="hasAudio">是否有音频</param>
+            <returns></returns>
+        </member>
+        <member name="M:JT1078.Flv.FlvEncoder.EncoderScriptTag(JT1078.Protocol.MessagePack.SPSInfo,System.Boolean,System.Double)">
+            <summary>
+            编码脚本Tag
+            </summary>
+            <param name="spsInfo">解析后的sps信息</param>
+            <param name="hasAudio">是否有音频</param>
+            <param name="frameRate">帧率 默认25d 即每秒25帧</param>
+            <returns></returns>
+        </member>
+        <member name="M:JT1078.Flv.FlvEncoder.EncoderScriptTag(JT1078.Protocol.JT1078AVFrame,System.Boolean,System.Double)">
+            <summary>
+            编码脚本Tag
+            </summary>
+            <param name="avframe">解析后的av信息</param>
+            <param name="hasAudio">是否有音频</param>
+            <param name="frameRate">帧率 默认25d 即每秒25帧</param>
+            <returns></returns>
+        </member>
+        <member name="M:JT1078.Flv.FlvEncoder.EncoderFirstVideoTag(JT1078.Protocol.MessagePack.SPSInfo,JT1078.Protocol.H264.H264NALU,JT1078.Protocol.H264.H264NALU,JT1078.Protocol.H264.H264NALU)">
+            <summary>
+             编码首帧视频，即videoTag[0]
+            </summary>
+            <param name="spsInfo">sps 解析后的数据</param>
+            <param name="sps"></param>
+            <param name="pps"></param>
+            <param name="sei"></param>
+            <returns></returns>
+        </member>
+        <member name="M:JT1078.Flv.FlvEncoder.EncoderFirstVideoTag(JT1078.Protocol.JT1078AVFrame)">
+            <summary>
+             编码首帧视频，即videoTag[0]
+            </summary>
+            <param name="avframe"></param>
+            <returns></returns>
+        </member>
+        <member name="M:JT1078.Flv.FlvEncoder.EncoderFirstAudioTag(System.UInt64)">
+            <summary>
+            编码首帧音频，即audioTag[0]
+            </summary>
+            <param name="timestamp"></param>
+            <returns></returns>
+        </member>
+        <member name="M:JT1078.Flv.FlvEncoder.EncoderVideoTag(JT1078.Protocol.JT1078Package,System.Boolean)">
+            <summary>
+            编码视频
+            </summary>
+            <remarks><paramref name="package"/>必须是组包后的数据</remarks>
+            <param name="package">1078包</param>
+            <param name="needVideoHeader">是否需要首帧视频</param>
+            <returns></returns>
+        </member>
+        <member name="M:JT1078.Flv.FlvEncoder.EncoderAudioTag(JT1078.Protocol.JT1078Package,System.Boolean)">
+            <summary>
+            编码非首帧音频
+            </summary>
+            <param name="package"></param>
+            <param name="needAacHeader">是否需要首帧音频</param>
+            <returns></returns>
+        </member>
+        <member name="M:JT1078.Flv.FlvEncoder.EncoderOtherVideoTag(JT1078.Protocol.H264.H264NALU)">
+            <summary>
+            编码非首帧视频
+            </summary>
+            <param name="nALU"></param>
+            <returns></returns>
+        </member>
+        <member name="P:JT1078.Flv.FlvTags.DataSize">
+            <summary>
+            Tag Data部分大小
+            3个字节
+            </summary>
+        </member>
+        <member name="P:JT1078.Flv.FlvTags.Timestamp">
+            <summary>
+            Tag时间戳
+            3个字节
+            </summary>
+        </member>
+        <member name="P:JT1078.Flv.FlvTags.StreamId">
+            <summary>
+            stream id 总是0
+            3个字节
+            </summary>
+        </member>
+        <member name="P:JT1078.Flv.FlvTags.VideoTagsData">
+            <summary>
+            根据tag类型
+            </summary>
+        </member>
+        <member name="P:JT1078.Flv.FlvTags.AudioTagsData">
+            <summary>
+            音频数据
+            </summary>
+        </member>
+        <member name="P:JT1078.Flv.FlvTags.DataTagsData">
+            <summary>
+            根据tag类型
+            </summary>
+        </member>
+        <member name="P:JT1078.Flv.Metadata.AacPacke.RawData">
+            <summary>
+            元数据
+            </summary>
+        </member>
+        <member name="P:JT1078.Flv.Metadata.Amf3.DataType">
+            <summary>
+            AMF3数据类型
+            </summary>
+        </member>
+        <member name="P:JT1078.Flv.Metadata.Amf3.Count">
+            <summary>
+            元素个数
+            </summary>
+        </member>
+        <member name="P:JT1078.Flv.Metadata.Amf3Metadata_VideoCodecId.Value">
+            <summary>
+            <see cref="!:typeof(JT1078.Flv.Enums.CodecId.AvcVideoPacke)"/>
+            </summary>
+        </member>
+        <member name="P:JT1078.Flv.Metadata.AudioSpecificConfig.ChannelConfiguration">
+            <summary>
+            其实有很多，这里就固定为立体声
+            </summary>
+        </member>
+        <member name="T:JT1078.Flv.Metadata.AudioSpecificConfig.AudioObjectType">
+            <summary>
+            音频类型
+            其实有很多，这里就列几个，如有需要再加
+            </summary>
+        </member>
+        <member name="P:JT1078.Flv.Metadata.AudioTags.SampleRate">
+            <summary>
+            采样率
+            AAC固定为3
+            0 = 5.5-kHz
+            1 = 11-kHz
+            2 = 22-kHz
+            3 = 44-kHz
+            </summary>
+        </member>
+        <member name="P:JT1078.Flv.Metadata.AudioTags.SampleBit">
+            <summary>
+            采样位深
+            </summary>
+        </member>
+        <member name="P:JT1078.Flv.Metadata.AudioTags.Channel">
+            <summary>
+            声道
+            AAC永远是1
+            </summary>
+        </member>
+        <member name="P:JT1078.Flv.Metadata.AudioTags.SoundType">
+            <summary>
+            音频格式
+            </summary>
+        </member>
+        <member name="P:JT1078.Flv.Metadata.AudioTags.AacPacke">
+            <summary>
+            元数据
+            </summary>
+        </member>
+        <!-- Badly formed XML comment ignored for member "T:JT1078.Flv.Metadata.AVCDecoderConfigurationRecord" -->
+        <member name="P:JT1078.Flv.Metadata.IAmf3Metadata.FieldNameLength">
+            <summary>
+            字段长度
+            </summary>
+        </member>
+        <member name="P:JT1078.Flv.Metadata.IAmf3Metadata.FieldName">
+            <summary>
+            字段名称
+            </summary>
+        </member>
+        <member name="P:JT1078.Flv.Metadata.IAmf3Metadata.DataType">
+            <summary>
+            Amf3数据类型
+            ref:video_file_format_spec_v10.pdf scriptdatavalue  type
+            </summary>
+        </member>
+        <member name="P:JT1078.Flv.Metadata.IAmf3Metadata.Value">
+            <summary>
+            对应的值
+            </summary>
+        </member>
+        <member name="P:JT1078.Flv.Metadata.VideoTags.FrameType">
+            <summary>
+            高4位
+            1: keyframe(for AVC, a seekable frame) —— 即H.264的IDR帧；
+            2: inter frame(for AVC, a non- seekable frame) —— H.264的普通I帧；
+            </summary>
+        </member>
+        <member name="P:JT1078.Flv.Metadata.VideoTags.CodecId">
+            <summary>
+            第四位
+            当 CodecID 为 7 时，VideoData 为 AVCVIDEOPACKE，也即 H.264媒体数据
+            </summary>
+        </member>
+    </members>
+</doc>
