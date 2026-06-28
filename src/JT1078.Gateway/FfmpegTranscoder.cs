@@ -166,14 +166,22 @@ public class FfmpegTranscoder
             string audioIn = withAudio
                 ? $"-thread_queue_size 1024 -f {_audioFmt} -ar {_audioRate} -ac 1 -i tcp://127.0.0.1:{audioPort} "
                 : "";
+            // The camera's real frame rate (~15) is below the -framerate 25 we feed,
+            // so the video PTS clock runs slower than the real-time audio clock and
+            // the streams diverge. Without help the HLS muxer holds packets waiting
+            // to interleave and STOPS cutting segments (the classic "1 segment then
+            // freeze" with audio). -max_interleave_delta 0 makes it flush instead of
+            // wait; aresample async lets the audio absorb the drift so it stays in
+            // sync without stalling.
             string maps = withAudio
-                ? "-map 0:v:0 -map 1:a:0 -c:a aac -b:a 64k -ar 44100 "
-                : "-an ";
+                ? "-map 0:v:0 -map 1:a:0 -c:a aac -b:a 64k -ar 44100 -filter:a aresample=async=1:min_hard_comp=0.100:first_pts=0 "
+                : "-map 0:v:0 -an ";
 
             string args =
                 "-hide_banner -loglevel warning " + videoIn + audioIn +
-                "-c:v libx264 -preset ultrafast -tune zerolatency -pix_fmt yuv420p -g 25 " + maps +
-                "-f hls -hls_time 1 -hls_list_size 4 " +
+                "-c:v libx264 -preset ultrafast -tune zerolatency -pix_fmt yuv420p -g 25 " +
+                "-max_interleave_delta 0 -muxpreload 0 -muxdelay 0 " + maps +
+                "-f hls -hls_time 1 -hls_list_size 6 " +
                 "-hls_flags delete_segments+omit_endlist+independent_segments " +
                 $"-hls_segment_type mpegts -hls_segment_filename \"{seg}\" \"{m3u8}\"";
 
