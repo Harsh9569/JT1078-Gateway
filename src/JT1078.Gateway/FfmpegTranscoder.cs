@@ -30,6 +30,8 @@ public class FfmpegTranscoder
         public int AudioPort;
         public bool WithAudio;
         public bool SawAudio;
+        public bool ForceNoAudio;     // set when we fall back to video-only
+        public bool TriedVideoOnly;
         public string Key;
         public long FramesIn;
         public long AudioIn;
@@ -134,7 +136,7 @@ public class FfmpegTranscoder
         lock (job.Gate)
         {
             if (job.State != JobState.Buffering) return;   // stopped before we could start
-            bool withAudio = _audioEnabled && job.SawAudio;
+            bool withAudio = _audioEnabled && job.SawAudio && !job.ForceNoAudio;
             job.WithAudio = withAudio;
 
             string safe = job.Key.Replace("/", "_").Replace("\\", "_").Replace("..", "_");
@@ -152,7 +154,7 @@ public class FfmpegTranscoder
 
             string videoIn = "-fflags +genpts -framerate 25 -f hevc -i pipe:0 ";
             string audioIn = withAudio
-                ? $"-thread_queue_size 1024 -f {_audioFmt} -ar {_audioRate} -ac 1 -i \"udp://127.0.0.1:{job.AudioPort}?overrun_nonfatal=1&fifo_size=1000000\" "
+                ? $"-thread_queue_size 1024 -f {_audioFmt} -ar {_audioRate} -ac 1 -i \"udp://127.0.0.1:{job.AudioPort}?reuse=1&overrun_nonfatal=1&fifo_size=1000000&timeout=0\" "
                 : "";
             string maps = withAudio
                 ? "-map 0:v:0 -map 1:a:0 -c:a aac -b:a 64k -ar 44100 "
@@ -189,6 +191,11 @@ public class FfmpegTranscoder
             job.Stdin = proc.StandardInput.BaseStream;
             job.State = JobState.Running;
 
+            // if ffmpeg dies on its own (e.g. audio input failed), recover instead
+            // of leaving a dead stream: retry once video-only so video never breaks.
+            proc.EnableRaisingEvents = true;
+            proc.Exited += (_, __) => HandleExit(job);
+
             if (withAudio)
             {
                 try { job.AudioOut = new UdpClient(); job.AudioOut.Connect(IPAddress.Loopback, job.AudioPort); }
@@ -223,6 +230,38 @@ public class FfmpegTranscoder
                 job.AudioIn += job.PendingAudio.Count;
             }
             job.PendingAudio.Clear();
+        }
+    }
+
+    // ffmpeg exited unexpectedly. If it was running with audio, retry once
+    // video-only (audio is best-effort; video must never break). Otherwise drop.
+    private void HandleExit(Job job)
+    {
+        lock (job.Gate)
+        {
+            if (job.State != JobState.Running) return;   // intentional stop -> ignore
+
+            int code = -1;
+            try { code = job.Proc?.ExitCode ?? -1; } catch { }
+            try { job.Stdin?.Close(); } catch { }
+            try { job.AudioOut?.Close(); } catch { }
+            job.AudioOut = null;
+            job.Proc = null;
+            job.Stdin = null;
+
+            if (job.WithAudio && !job.TriedVideoOnly)
+            {
+                job.TriedVideoOnly = true;
+                job.ForceNoAudio = true;
+                job.State = JobState.Buffering;   // new frames re-buffer until restart
+                _log.LogWarning("[FFMPEG] {k} exited (code {c}) with audio; retrying VIDEO-ONLY", job.Key, code);
+                _ = Task.Run(async () => { await Task.Delay(700); StartJob(job); });
+            }
+            else
+            {
+                _log.LogWarning("[FFMPEG] {k} exited (code {c}); dropping", job.Key, code);
+                StopLocked(job);
+            }
         }
     }
 
