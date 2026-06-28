@@ -141,6 +141,15 @@ public class FfmpegTranscoder
             string m3u8 = Path.Combine(_outDir, safe + ".m3u8");
             string seg = Path.Combine(_outDir, safe + "_%03d.ts");
 
+            // Clear any stale HLS files for this key (e.g. leftover from a previous
+            // LIVE session) so a new live/playback session never shows old segments.
+            try
+            {
+                foreach (var f in Directory.GetFiles(_outDir, safe + "_*.ts")) File.Delete(f);
+                if (File.Exists(m3u8)) File.Delete(m3u8);
+            }
+            catch { }
+
             string videoIn = "-fflags +genpts -framerate 25 -f hevc -i pipe:0 ";
             string audioIn = withAudio
                 ? $"-thread_queue_size 1024 -f {_audioFmt} -ar {_audioRate} -ac 1 -i \"udp://127.0.0.1:{job.AudioPort}?overrun_nonfatal=1&fifo_size=1000000\" "
@@ -153,7 +162,7 @@ public class FfmpegTranscoder
                 "-hide_banner -loglevel warning " + videoIn + audioIn +
                 "-c:v libx264 -preset ultrafast -tune zerolatency -pix_fmt yuv420p -g 25 " + maps +
                 "-f hls -hls_time 1 -hls_list_size 4 " +
-                "-hls_flags delete_segments+append_list+omit_endlist+independent_segments " +
+                "-hls_flags delete_segments+omit_endlist+independent_segments " +
                 $"-hls_segment_type mpegts -hls_segment_filename \"{seg}\" \"{m3u8}\"";
 
             var psi = new ProcessStartInfo
