@@ -121,12 +121,22 @@ public class TcpIngest
 
             var full = JT1078Serializer.Merge(package, JT808ChannelType.Live);
             if (full == null) { mergeNull++; return; }
-            if (full.Label3.DataType == JT1078DataType.音频帧) { audioPkts++; return; }
-            videoPkts++;
 
             if (full.Bodies == null || full.Bodies.Length == 0) return;
-
             string key = full.GetAVKey();
+
+            // Audio frame -> feed FFmpeg's audio input (muxed as AAC into the HLS).
+            if (full.Label3.DataType == JT1078DataType.音频帧)
+            {
+                audioPkts++;
+                if (audioPkts == 1)
+                    _log.LogInformation("[DIAG] {r} FIRST audio frame {n}B: {hex}", remote,
+                        Math.Min(full.Bodies.Length, 32), Convert.ToHexString(full.Bodies, 0, Math.Min(full.Bodies.Length, 32)));
+                _ff.FeedAudio(key, full.Bodies);
+                return;
+            }
+
+            videoPkts++;
             if (streamKeys.Add(key))
                 _log.LogInformation("[INGEST] LIVE stream key={k} from {r} -> transcoding H.265->H.264 HLS", key, remote);
 

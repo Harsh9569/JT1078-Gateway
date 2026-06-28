@@ -12,7 +12,14 @@ string webRoot = app.Environment.WebRootPath
                  ?? Path.Combine(AppContext.BaseDirectory, "wwwroot");
 string hlsDir = Path.Combine(webRoot, "live");
 
-var transcoder = new FfmpegTranscoder(ffmpegPath, hlsDir, app.Logger);
+// audio: the camera's audio codec fed to ffmpeg. Most MDVRs use G.711A (alaw,
+// 8 kHz mono). If the [DIAG] FIRST audio frame shows a different codec, change
+// AudioFormat (e.g. "mulaw") / AudioRate in appsettings.json.
+bool audioEnabled = !string.Equals(builder.Configuration["Audio"], "false", StringComparison.OrdinalIgnoreCase);
+string audioFmt = builder.Configuration["AudioFormat"] ?? "alaw";
+int audioRate = int.Parse(builder.Configuration["AudioRate"] ?? "8000");
+
+var transcoder = new FfmpegTranscoder(ffmpegPath, hlsDir, app.Logger, audioEnabled, audioFmt, audioRate);
 new TcpIngest(transcoder, ingestPort, app.Logger).Start();
 
 // serve .m3u8 / .ts with the right content types (not in the default map)
