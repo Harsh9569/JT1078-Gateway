@@ -27,7 +27,8 @@ public class TcpIngest
     // and a new connection only takes over if the current owner has gone silent.
     private sealed class Owner { public long ConnId; public long LastTick; }
     private static long _connSeq;
-    private const int StaleMs = 2000;   // take over only if current owner silent this long
+    private const int StaleMs = 2000;    // take over only if current owner silent this long
+    private const int GraceMs = 10000;   // keep ffmpeg alive this long after owner drops, for reconnect
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Owner> _keyOwner = new();
 
     public TcpIngest(FfmpegTranscoder ff, int port, ILogger log)
@@ -95,14 +96,20 @@ public class TcpIngest
         finally
         {
             client.Close();
-            // only stop channels THIS connection still owns — a superseded (old)
-            // connection disconnecting must not kill the live owner's stream.
+            // Don't kill the transcode immediately — this camera reconnects within
+            // ~1-2s. Orphan each channel we own and keep ffmpeg alive for a grace
+            // period so the reconnecting socket resumes the SAME HLS stream (no
+            // folder wipe, no player break). Stop only if nobody reconnects in time.
             foreach (var k in streamKeys)
             {
-                if (_keyOwner.TryGetValue(k, out var o) && Volatile.Read(ref o.ConnId) == connId)
+                if (_keyOwner.TryGetValue(k, out var o))
                 {
-                    _keyOwner.TryRemove(k, out _);
-                    _ff.Stop(k);
+                    long stamp = 0; bool orphaned = false;
+                    lock (o)
+                    {
+                        if (o.ConnId == connId) { o.ConnId = 0; o.LastTick = Environment.TickCount64; stamp = o.LastTick; orphaned = true; }
+                    }
+                    if (orphaned) ScheduleGraceStop(k, stamp);
                 }
             }
             _log.LogInformation("[INGEST] camera disconnected {r} (conn #{id}) | bytes={b} pkts={p} video={v} audio={a} mergeNull={m} errors={e} dataTypes=[{dt}] keys=[{k}] lastErr={le}",
@@ -150,11 +157,15 @@ public class TcpIngest
             lock (owner)
             {
                 if (owner.ConnId == connId) { owner.LastTick = nowTick; mine = true; }
-                else if (nowTick - owner.LastTick > StaleMs)
+                else if (owner.ConnId == 0 || nowTick - owner.LastTick > StaleMs)
                 {
-                    _log.LogInformation("[INGEST] {k}: conn #{me} took over from silent conn #{old}; restarting transcode", key, connId, owner.ConnId);
+                    // owner disconnected (orphaned) or went silent: this connection
+                    // takes over the SAME ffmpeg job — seamless, NO restart, so the
+                    // HLS folder isn't wiped and segment numbering keeps going. The
+                    // player resumes on reconnect instead of breaking.
+                    long prev = owner.ConnId;
                     owner.ConnId = connId; owner.LastTick = nowTick; mine = true;
-                    _ff.Stop(key);   // clean restart for the new owner
+                    _log.LogInformation("[INGEST] {k}: conn #{me} took over (prev #{old}) — seamless", key, connId, prev);
                 }
                 else { mine = false; }   // another connection is actively streaming this channel
             }
@@ -182,6 +193,26 @@ public class TcpIngest
             _ff.Feed(key, full.Bodies);
         }
         catch (Exception ex) { errors++; lastErr = ex.Message; }
+    }
+
+    // After an owner disconnects we orphan its channel (ConnId=0) but leave the
+    // ffmpeg job running. If the camera reconnects within GraceMs, the new socket
+    // takes over seamlessly. If not, we stop the now-idle transcode here.
+    private void ScheduleGraceStop(string key, long stamp)
+    {
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(GraceMs);
+            if (!_keyOwner.TryGetValue(key, out var o)) return;
+            bool stop = false;
+            lock (o) { if (o.ConnId == 0 && o.LastTick == stamp) stop = true; }  // still orphaned, untouched
+            if (stop)
+            {
+                _keyOwner.TryRemove(key, out _);
+                _ff.Stop(key);
+                _log.LogInformation("[INGEST] {k}: no reconnect within {ms}ms — stopped transcode", key, GraceMs);
+            }
+        });
     }
 
     private static int IndexOf(List<byte> buf, int from)
