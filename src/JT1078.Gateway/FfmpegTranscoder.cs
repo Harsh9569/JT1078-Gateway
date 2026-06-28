@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Threading.Channels;
 
 namespace JT1078.Gateway;
 
@@ -31,6 +32,7 @@ public class FfmpegTranscoder
         public Stream Stdin;
         public TcpListener AudioListener;
         public Stream AudioStream;     // accepted ffmpeg audio connection
+        public Channel<byte[]> AudioQueue;   // ingest -> writer task; drops when full
         public bool WithAudio;
         public bool SawAudio;
         public bool ForceNoAudio;      // set when we fall back to video-only
@@ -94,9 +96,13 @@ public class FfmpegTranscoder
                 if (job.PendingAudio.Count < MaxBuffered) job.PendingAudio.Add(audio);
                 return;
             }
-            if (job.State != JobState.Running || !job.WithAudio || job.AudioStream == null) return;
-            try { job.AudioStream.Write(audio, 0, audio.Length); job.AudioIn++; }
-            catch { /* best-effort */ }
+            if (job.State != JobState.Running || !job.WithAudio) return;
+            // Non-blocking hand-off: a dedicated task drains this queue to ffmpeg's
+            // audio socket. Audio must NEVER block here — this runs on the same
+            // thread that feeds video, and a blocking audio write (when ffmpeg
+            // stops draining) would stall video too. Drop oldest if the queue is
+            // full (audio is best-effort; video must keep flowing).
+            if (job.AudioQueue != null && job.AudioQueue.Writer.TryWrite(audio)) job.AudioIn++;
         }
     }
 
@@ -154,6 +160,8 @@ public class FfmpegTranscoder
                     job.AudioListener = new TcpListener(IPAddress.Loopback, 0);
                     job.AudioListener.Start();
                     audioPort = ((IPEndPoint)job.AudioListener.LocalEndpoint).Port;
+                    job.AudioQueue = Channel.CreateBounded<byte[]>(
+                        new BoundedChannelOptions(300) { FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true });
                 }
                 catch (Exception ex)
                 {
@@ -162,26 +170,21 @@ public class FfmpegTranscoder
                 }
             }
 
-            // Timestamp BOTH inputs by real arrival time so video and audio share
-            // one wall-clock timeline. (Previously we forced -framerate 25 on a
-            // camera that really sends ~15fps, so the video PTS clock ran slower
-            // than the real-time audio clock; they diverged and the HLS muxer
-            // stalled after a few segments — "freezes after ~3s with audio".)
-            string videoIn = "-use_wallclock_as_timestamps 1 -f hevc -i pipe:0 ";
+            // Video path is the known-good config (produces continuous video).
+            // -max_interleave_delta 0 keeps the muxer flushing instead of waiting,
+            // and the audio is fed on a separate non-blocking writer (see below) so
+            // it can never stall the video pipe.
+            string videoIn = "-fflags +genpts -framerate 25 -f hevc -i pipe:0 ";
             string audioIn = withAudio
-                ? $"-use_wallclock_as_timestamps 1 -thread_queue_size 1024 -f {_audioFmt} -ar {_audioRate} -ac 1 -i tcp://127.0.0.1:{audioPort} "
+                ? $"-thread_queue_size 1024 -f {_audioFmt} -ar {_audioRate} -ac 1 -i tcp://127.0.0.1:{audioPort} "
                 : "";
             string maps = withAudio
                 ? "-map 0:v:0 -map 1:a:0 -c:a aac -b:a 64k -ar 44100 -filter:a aresample=async=1000 "
                 : "-map 0:v:0 -an ";
 
-            // Input is real-time VFR now, so force a keyframe every 1s (by time, not
-            // frame count) — that gives HLS a clean cut point each second regardless
-            // of the actual frame rate. -max_interleave_delta 0 = flush, never wait.
             string args =
                 "-hide_banner -loglevel warning " + videoIn + audioIn +
-                "-c:v libx264 -preset ultrafast -tune zerolatency -pix_fmt yuv420p " +
-                "-force_key_frames \"expr:gte(t,n_forced*1)\" " +
+                "-c:v libx264 -preset ultrafast -tune zerolatency -pix_fmt yuv420p -g 25 " +
                 "-max_interleave_delta 0 -muxpreload 0 -muxdelay 0 " + maps +
                 "-f hls -hls_time 1 -hls_list_size 6 " +
                 "-hls_flags delete_segments+omit_endlist+independent_segments " +
@@ -215,7 +218,11 @@ public class FfmpegTranscoder
             proc.EnableRaisingEvents = true;
             proc.Exited += (_, __) => HandleExit(job);
 
-            // accept ffmpeg's audio connection, then flush pending + stream live
+            // Accept ffmpeg's audio connection, then run a DEDICATED writer task that
+            // drains the audio queue to the socket. All blocking socket writes happen
+            // here — never on the video ingest thread — so a stalled audio socket can
+            // never freeze video. If the write blocks/fails we just stop audio; video
+            // keeps running.
             if (withAudio && job.AudioListener != null)
             {
                 var listener = job.AudioListener;
@@ -225,17 +232,26 @@ public class FfmpegTranscoder
                     {
                         var client = await listener.AcceptTcpClientAsync();
                         client.NoDelay = true;
+                        client.SendTimeout = 2000;
                         var stream = client.GetStream();
+
+                        List<byte[]> pending;
                         lock (job.Gate)
                         {
                             if (job.State != JobState.Running) { try { stream.Dispose(); } catch { } return; }
                             job.AudioStream = stream;
-                            foreach (var a in job.PendingAudio) { try { stream.Write(a, 0, a.Length); } catch { } }
-                            job.AudioIn += job.PendingAudio.Count;
+                            pending = new List<byte[]>(job.PendingAudio);
                             job.PendingAudio.Clear();
                         }
+
+                        foreach (var a in pending) await stream.WriteAsync(a, 0, a.Length);
+
+                        var reader = job.AudioQueue.Reader;
+                        while (await reader.WaitToReadAsync())
+                            while (reader.TryRead(out var buf))
+                                await stream.WriteAsync(buf, 0, buf.Length);
                     }
-                    catch { /* listener stopped / ffmpeg never connected */ }
+                    catch { /* ffmpeg never connected, socket closed, or write stalled — drop audio, keep video */ }
                 });
             }
 
@@ -298,6 +314,7 @@ public class FfmpegTranscoder
     {
         if (job.State == JobState.Dead) return;
         job.State = JobState.Dead;
+        try { job.AudioQueue?.Writer.TryComplete(); } catch { }
         try { job.Stdin?.Close(); } catch { }
         try { job.AudioStream?.Close(); } catch { }
         try { job.AudioListener?.Stop(); } catch { }
