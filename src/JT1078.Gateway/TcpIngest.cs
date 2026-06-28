@@ -18,6 +18,18 @@ public class TcpIngest
     private readonly int _port;
     private readonly ILogger _log;
 
+    // ── one owner per channel ──────────────────────────────────────────────────
+    // Some cameras open a SECOND push connection for a channel they're already
+    // streaming, without closing the first. If both connections feed the same
+    // stream key, their JT1078 sub-packets interleave and the frame merge breaks
+    // (video plays ~1s then freezes). So each channel key has a single owning
+    // connection: a duplicate connection's packets are dropped BEFORE the merge,
+    // and a new connection only takes over if the current owner has gone silent.
+    private sealed class Owner { public long ConnId; public long LastTick; }
+    private static long _connSeq;
+    private const int StaleMs = 2000;   // take over only if current owner silent this long
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Owner> _keyOwner = new();
+
     public TcpIngest(FfmpegTranscoder ff, int port, ILogger log)
     {
         _ff = ff; _port = port; _log = log;
@@ -45,8 +57,9 @@ public class TcpIngest
     private async Task HandleClient(TcpClient client)
     {
         var remote = client.Client.RemoteEndPoint?.ToString();
-        _log.LogInformation("[INGEST] camera connected {r}", remote);
-        var streamKeys = new HashSet<string>();   // keys this connection produced (to stop on disconnect)
+        long connId = System.Threading.Interlocked.Increment(ref _connSeq);
+        _log.LogInformation("[INGEST] camera connected {r} (conn #{id})", remote, connId);
+        var streamKeys = new HashSet<string>();   // keys this connection owns (to stop on disconnect)
         var buffer = new List<byte>();
         var readBuf = new byte[65536];
 
@@ -73,7 +86,7 @@ public class TcpIngest
                     firstChunkLogged = true;
                 }
                 for (int i = 0; i < n; i++) buffer.Add(readBuf[i]);
-                Process(buffer, streamKeys, remote,
+                Process(buffer, streamKeys, remote, connId,
                     ref totalPkts, ref mergeNull, ref videoPkts, ref audioPkts, ref errors, ref lastErr, dataTypes, subTypes);
                 stats.MaybeLog(totalPkts, totalBytes);
             }
@@ -82,13 +95,22 @@ public class TcpIngest
         finally
         {
             client.Close();
-            _ff.StopAll(streamKeys);
-            _log.LogInformation("[INGEST] camera disconnected {r} | bytes={b} pkts={p} video={v} audio={a} mergeNull={m} errors={e} dataTypes=[{dt}] keys=[{k}] lastErr={le}",
-                remote, totalBytes, totalPkts, videoPkts, audioPkts, mergeNull, errors, string.Join(",", dataTypes), string.Join(",", streamKeys), lastErr);
+            // only stop channels THIS connection still owns — a superseded (old)
+            // connection disconnecting must not kill the live owner's stream.
+            foreach (var k in streamKeys)
+            {
+                if (_keyOwner.TryGetValue(k, out var o) && Volatile.Read(ref o.ConnId) == connId)
+                {
+                    _keyOwner.TryRemove(k, out _);
+                    _ff.Stop(k);
+                }
+            }
+            _log.LogInformation("[INGEST] camera disconnected {r} (conn #{id}) | bytes={b} pkts={p} video={v} audio={a} mergeNull={m} errors={e} dataTypes=[{dt}] keys=[{k}] lastErr={le}",
+                remote, connId, totalBytes, totalPkts, videoPkts, audioPkts, mergeNull, errors, string.Join(",", dataTypes), string.Join(",", streamKeys), lastErr);
         }
     }
 
-    private void Process(List<byte> buf, HashSet<string> streamKeys, string remote,
+    private void Process(List<byte> buf, HashSet<string> streamKeys, string remote, long connId,
         ref int totalPkts, ref int mergeNull, ref int videoPkts, ref int audioPkts, ref int errors, ref string lastErr,
         HashSet<string> dataTypes, HashSet<string> subTypes)
     {
@@ -105,11 +127,11 @@ public class TcpIngest
             var pkt = buf.GetRange(start, next - start).ToArray();
             buf.RemoveRange(0, next);
             totalPkts++;
-            Handle(pkt, streamKeys, remote, ref mergeNull, ref videoPkts, ref audioPkts, ref errors, ref lastErr, dataTypes, subTypes);
+            Handle(pkt, streamKeys, remote, connId, ref mergeNull, ref videoPkts, ref audioPkts, ref errors, ref lastErr, dataTypes, subTypes);
         }
     }
 
-    private void Handle(byte[] bytes, HashSet<string> streamKeys, string remote,
+    private void Handle(byte[] bytes, HashSet<string> streamKeys, string remote, long connId,
         ref int mergeNull, ref int videoPkts, ref int audioPkts, ref int errors, ref string lastErr,
         HashSet<string> dataTypes, HashSet<string> subTypes)
     {
@@ -119,11 +141,31 @@ public class TcpIngest
             if (dataTypes.Count < 12) dataTypes.Add(package.Label3.DataType.ToString());
             if (subTypes.Count < 12) subTypes.Add(package.Label3.SubpackageType.ToString());
 
+            // ── ownership gate (runs BEFORE the merge so a duplicate connection
+            //    can never contaminate the per-key merge state) ────────────────
+            string key = package.GetAVKey();
+            long nowTick = Environment.TickCount64;
+            var owner = _keyOwner.GetOrAdd(key, _ => new Owner { ConnId = connId, LastTick = nowTick });
+            bool mine;
+            lock (owner)
+            {
+                if (owner.ConnId == connId) { owner.LastTick = nowTick; mine = true; }
+                else if (nowTick - owner.LastTick > StaleMs)
+                {
+                    _log.LogInformation("[INGEST] {k}: conn #{me} took over from silent conn #{old}; restarting transcode", key, connId, owner.ConnId);
+                    owner.ConnId = connId; owner.LastTick = nowTick; mine = true;
+                    _ff.Stop(key);   // clean restart for the new owner
+                }
+                else { mine = false; }   // another connection is actively streaming this channel
+            }
+            if (!mine) return;
+            if (streamKeys.Add(key))
+                _log.LogInformation("[INGEST] LIVE stream key={k} from {r} (conn #{id}) -> transcoding H.265->H.264 HLS", key, remote, connId);
+
             var full = JT1078Serializer.Merge(package, JT808ChannelType.Live);
             if (full == null) { mergeNull++; return; }
 
             if (full.Bodies == null || full.Bodies.Length == 0) return;
-            string key = full.GetAVKey();
 
             // Audio frame -> feed FFmpeg's audio input (muxed as AAC into the HLS).
             if (full.Label3.DataType == JT1078DataType.音频帧)
@@ -137,9 +179,6 @@ public class TcpIngest
             }
 
             videoPkts++;
-            if (streamKeys.Add(key))
-                _log.LogInformation("[INGEST] LIVE stream key={k} from {r} -> transcoding H.265->H.264 HLS", key, remote);
-
             _ff.Feed(key, full.Bodies);
         }
         catch (Exception ex) { errors++; lastErr = ex.Message; }
