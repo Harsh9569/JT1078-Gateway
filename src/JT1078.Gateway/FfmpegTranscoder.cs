@@ -162,24 +162,26 @@ public class FfmpegTranscoder
                 }
             }
 
-            string videoIn = "-fflags +genpts -framerate 25 -f hevc -i pipe:0 ";
+            // Timestamp BOTH inputs by real arrival time so video and audio share
+            // one wall-clock timeline. (Previously we forced -framerate 25 on a
+            // camera that really sends ~15fps, so the video PTS clock ran slower
+            // than the real-time audio clock; they diverged and the HLS muxer
+            // stalled after a few segments — "freezes after ~3s with audio".)
+            string videoIn = "-use_wallclock_as_timestamps 1 -f hevc -i pipe:0 ";
             string audioIn = withAudio
-                ? $"-thread_queue_size 1024 -f {_audioFmt} -ar {_audioRate} -ac 1 -i tcp://127.0.0.1:{audioPort} "
+                ? $"-use_wallclock_as_timestamps 1 -thread_queue_size 1024 -f {_audioFmt} -ar {_audioRate} -ac 1 -i tcp://127.0.0.1:{audioPort} "
                 : "";
-            // The camera's real frame rate (~15) is below the -framerate 25 we feed,
-            // so the video PTS clock runs slower than the real-time audio clock and
-            // the streams diverge. Without help the HLS muxer holds packets waiting
-            // to interleave and STOPS cutting segments (the classic "1 segment then
-            // freeze" with audio). -max_interleave_delta 0 makes it flush instead of
-            // wait; aresample async lets the audio absorb the drift so it stays in
-            // sync without stalling.
             string maps = withAudio
-                ? "-map 0:v:0 -map 1:a:0 -c:a aac -b:a 64k -ar 44100 -filter:a aresample=async=1:min_hard_comp=0.100:first_pts=0 "
+                ? "-map 0:v:0 -map 1:a:0 -c:a aac -b:a 64k -ar 44100 -filter:a aresample=async=1000 "
                 : "-map 0:v:0 -an ";
 
+            // Input is real-time VFR now, so force a keyframe every 1s (by time, not
+            // frame count) — that gives HLS a clean cut point each second regardless
+            // of the actual frame rate. -max_interleave_delta 0 = flush, never wait.
             string args =
                 "-hide_banner -loglevel warning " + videoIn + audioIn +
-                "-c:v libx264 -preset ultrafast -tune zerolatency -pix_fmt yuv420p -g 25 " +
+                "-c:v libx264 -preset ultrafast -tune zerolatency -pix_fmt yuv420p " +
+                "-force_key_frames \"expr:gte(t,n_forced*1)\" " +
                 "-max_interleave_delta 0 -muxpreload 0 -muxdelay 0 " + maps +
                 "-f hls -hls_time 1 -hls_list_size 6 " +
                 "-hls_flags delete_segments+omit_endlist+independent_segments " +
