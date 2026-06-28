@@ -20,6 +20,15 @@ int audioRate = int.Parse(builder.Configuration["AudioRate"] ?? "8000");
 string hlsDir = Path.Combine(builder.Environment.ContentRootPath, "hls");
 Directory.CreateDirectory(hlsDir);
 
+// Remove any stale wwwroot/live from older builds — otherwise the static-file
+// middleware serves those dead files and shadows the /live route below.
+try
+{
+    string oldLive = Path.Combine(builder.Environment.WebRootPath ?? Path.Combine(builder.Environment.ContentRootPath, "wwwroot"), "live");
+    if (Directory.Exists(oldLive)) Directory.Delete(oldLive, true);
+}
+catch { }
+
 var transcoder = new FfmpegTranscoder(ffmpegPath, hlsDir, app.Logger, audioEnabled, audioFmt, audioRate);
 new TcpIngest(transcoder, ingestPort, app.Logger).Start();
 
