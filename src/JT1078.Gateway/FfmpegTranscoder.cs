@@ -271,6 +271,30 @@ public class FfmpegTranscoder
             _log.LogInformation("[FFMPEG] {k} started withAudio={a} (in {f}/{r}Hz, tcp:{p}) -> {m3u8}",
                 job.Key, withAudio, _audioFmt, _audioRate, audioPort, m3u8);
 
+            // Watchdog: some channels (e.g. higher-res streams) let ffmpeg sit
+            // interleaving audio+video forever without ever flushing a segment.
+            // If no HLS playlist appears within the window, kill ffmpeg — that
+            // triggers HandleExit, which retries the channel VIDEO-ONLY so video
+            // always comes through (audio is best-effort).
+            if (withAudio)
+            {
+                string watchM3u8 = m3u8;
+                var watchProc = proc;
+                _ = Task.Run(async () =>
+                {
+                    await Task.Delay(6000);
+                    bool kill;
+                    lock (job.Gate)
+                        kill = job.State == JobState.Running && job.WithAudio
+                               && !job.TriedVideoOnly && !File.Exists(watchM3u8);
+                    if (kill)
+                    {
+                        _log.LogWarning("[FFMPEG] {k} no HLS output in 6s with audio; falling back to VIDEO-ONLY", job.Key);
+                        try { if (!watchProc.HasExited) watchProc.Kill(true); } catch { }
+                    }
+                });
+            }
+
             // flush buffered video
             foreach (var v in job.PendingVideo) { try { job.Stdin.Write(v, 0, v.Length); } catch { } }
             try { job.Stdin.Flush(); } catch { }
