@@ -40,6 +40,7 @@ public class FfmpegTranscoder
         public string Key;
         public long FramesIn;
         public long AudioIn;
+        public bool? IsHevc;           // detected video codec: true=H.265, false=H.264, null=unknown
         public readonly List<byte[]> PendingVideo = new();
         public readonly List<byte[]> PendingAudio = new();
     }
@@ -119,6 +120,31 @@ public class FfmpegTranscoder
 
     // ── internals ─────────────────────────────────────────────────────────────
 
+    // Detect the video codec from Annex-B NAL headers so FFmpeg is hinted correctly.
+    // H.264: nal_unit_type = firstByte & 0x1F  (SPS = 7  -> bytes 0x67/0x47/0x27)
+    // H.265: nal_unit_type = (firstByte>>1) & 0x3F (VPS=32/0x40, SPS=33/0x42)
+    // Returns true = H.265, false = H.264, null = undetermined (caller defaults H.265).
+    private static bool? DetectHevc(IEnumerable<byte[]> frames)
+    {
+        foreach (var f in frames)
+        {
+            if (f == null) continue;
+            for (int i = 0; i + 4 < f.Length; i++)
+            {
+                if (f[i] != 0 || f[i + 1] != 0) continue;         // Annex-B start code?
+                int nalPos;
+                if (f[i + 2] == 1) nalPos = i + 3;                 // 00 00 01
+                else if (f[i + 2] == 0 && f[i + 3] == 1) nalPos = i + 4; // 00 00 00 01
+                else continue;
+                if (nalPos >= f.Length) break;
+                byte b = f[nalPos];
+                if (b == 0x67 || b == 0x47 || b == 0x27) return false; // H.264 SPS
+                if (b == 0x40 || b == 0x42) return true;               // H.265 VPS/SPS
+            }
+        }
+        return null;
+    }
+
     private Job GetOrCreate(string key)
     {
         return _jobs.GetOrAdd(key, k =>
@@ -137,6 +163,16 @@ public class FfmpegTranscoder
             if (job.State != JobState.Buffering) return;
             bool withAudio = _audioEnabled && job.SawAudio && !job.ForceNoAudio;
             job.WithAudio = withAudio;
+
+            // Detect the actual video codec from the buffered Annex-B frames. Old
+            // cameras are H.265 (firmware-fixed); some JT/T 808-2019 units (15-digit
+            // IMEI) send H.264. Feeding H.264 into "-f hevc" makes FFmpeg decode
+            // nothing -> no HLS output -> watchdog kills it -> even the video-only
+            // retry fails. Pick the right demuxer; default H.265 so old cameras are
+            // unchanged when detection is inconclusive.
+            if (job.IsHevc == null) job.IsHevc = DetectHevc(job.PendingVideo);
+            bool useHevc = job.IsHevc ?? true;
+            string codecFmt = useHevc ? "hevc" : "h264";
 
             string safe = job.Key.Replace("/", "_").Replace("\\", "_").Replace("..", "_");
             string m3u8 = Path.Combine(_outDir, safe + ".m3u8");
@@ -174,7 +210,7 @@ public class FfmpegTranscoder
             // -max_interleave_delta 0 keeps the muxer flushing instead of waiting,
             // and the audio is fed on a separate non-blocking writer (see below) so
             // it can never stall the video pipe.
-            string videoIn = "-fflags +genpts -framerate 25 -f hevc -i pipe:0 ";
+            string videoIn = $"-fflags +genpts -framerate 25 -f {codecFmt} -i pipe:0 ";
             string audioIn = withAudio
                 ? $"-thread_queue_size 1024 -f {_audioFmt} -ar {_audioRate} -ac 1 -i tcp://127.0.0.1:{audioPort} "
                 : "";
@@ -268,8 +304,8 @@ public class FfmpegTranscoder
                 catch { }
             });
 
-            _log.LogInformation("[FFMPEG] {k} started withAudio={a} (in {f}/{r}Hz, tcp:{p}) -> {m3u8}",
-                job.Key, withAudio, _audioFmt, _audioRate, audioPort, m3u8);
+            _log.LogInformation("[FFMPEG] {k} started codec={c} withAudio={a} (in {f}/{r}Hz, tcp:{p}) -> {m3u8}",
+                job.Key, codecFmt, withAudio, _audioFmt, _audioRate, audioPort, m3u8);
 
             // Watchdog: some channels (e.g. higher-res streams) let ffmpeg sit
             // interleaving audio+video forever without ever flushing a segment.
