@@ -55,7 +55,24 @@ namespace JT1078.Protocol
             jT1078Package.Label1 = new JT1078Label1(jT1078MessagePackReader.ReadByte());
             jT1078Package.Label2 = new JT1078Label2(jT1078MessagePackReader.ReadByte());
             jT1078Package.SN = jT1078MessagePackReader.ReadUInt16();
-            jT1078Package.SIM = jT1078MessagePackReader.ReadBCD(12);
+            // SIM length: JT/T 1078-2013/2016 uses a 6-byte BCD SIM. Some JT/T
+            // 808-2019 cameras (15-digit IMEI) carry a 10-byte BCD SIM instead,
+            // which shifts the channel + payload 4 bytes. Detect it WITHOUT
+            // breaking existing 6-byte cameras: the byte that would be the logical
+            // channel under a 6-byte read must be a real channel (1..37). If it's
+            // not, but reading 10 bytes yields a valid channel, this is a 10-byte
+            // SIM packet. Defaults to 6 bytes, so all current cameras are unchanged.
+            int simDigits = 12; // 6 bytes
+            // absolute offsets from frame start: FH(4)+L1(1)+L2(1)+SN(2) = 8
+            if (bytes.Length > 19)
+            {
+                byte ch6 = bytes[14];             // channel if SIM is 6 bytes
+                byte ch10 = bytes[18];            // channel if SIM is 10 bytes
+                bool valid6 = ch6 >= 1 && ch6 <= 37;
+                bool valid10 = ch10 >= 1 && ch10 <= 37;
+                if (!valid6 && valid10) simDigits = 20; // 10 bytes
+            }
+            jT1078Package.SIM = jT1078MessagePackReader.ReadBCD(simDigits);
             jT1078Package.LogicChannelNumber = jT1078MessagePackReader.ReadByte();
             jT1078Package.Label3 = new JT1078Label3(jT1078MessagePackReader.ReadByte());
             if (jT1078Package.Label3.DataType != JT1078DataType.透传数据)
