@@ -41,7 +41,6 @@ public class FfmpegTranscoder
         public long FramesIn;
         public long AudioIn;
         public bool? IsHevc;           // detected video codec: true=H.265, false=H.264, null=unknown
-        public bool SentKeyframe;      // has this ffmpeg process received its first I-frame yet?
         public readonly List<byte[]> PendingVideo = new();
         public readonly List<byte[]> PendingAudio = new();
     }
@@ -81,15 +80,6 @@ public class FfmpegTranscoder
                 return;
             }
             if (job.State != JobState.Running) return;
-            // Never hand FFmpeg a P-frame before the first I-frame of this process:
-            // the decoder logs "non-existing PPS 0 / no frame", decodes nothing, and
-            // no HLS segment forms (blank channel; with audio it reads as the "no HLS
-            // output in 6s" stall). Drop leading P-frames until an SPS-bearing I-frame.
-            if (!job.SentKeyframe)
-            {
-                if (!StartsGop(annexB)) return;
-                job.SentKeyframe = true;
-            }
             try { job.Stdin.Write(annexB, 0, annexB.Length); job.Stdin.Flush(); job.FramesIn++; }
             catch (Exception ex) { _log.LogWarning("[FFMPEG] {k} video write failed ({m})", key, ex.Message); StopLocked(job); }
         }
@@ -153,26 +143,6 @@ public class FfmpegTranscoder
             }
         }
         return null;
-    }
-
-    // True if this Annex-B frame begins a GOP, i.e. it carries a parameter set
-    // (H.264 SPS 0x67/0x47/0x27, or H.265 VPS/SPS 0x40/0x42). FFmpeg must start on
-    // such a frame or it can't decode the P-frames that follow.
-    private static bool StartsGop(byte[] frame)
-    {
-        if (frame == null) return false;
-        for (int i = 0; i + 4 < frame.Length; i++)
-        {
-            if (frame[i] != 0 || frame[i + 1] != 0) continue;
-            int nalPos;
-            if (frame[i + 2] == 1) nalPos = i + 3;
-            else if (frame[i + 2] == 0 && frame[i + 3] == 1) nalPos = i + 4;
-            else continue;
-            if (nalPos >= frame.Length) break;
-            byte b = frame[nalPos];
-            if (b == 0x67 || b == 0x47 || b == 0x27 || b == 0x40 || b == 0x42) return true;
-        }
-        return false;
     }
 
     // Detect ADTS AAC audio: frames begin with a 12-bit sync word 0xFFF
@@ -412,22 +382,10 @@ public class FfmpegTranscoder
                 });
             }
 
-            // Flush buffered video starting from the most recent I-frame, so FFmpeg's
-            // very first frame carries SPS/PPS. If the buffer holds no I-frame yet
-            // (connected mid-GOP), flush nothing — Feed() will start on the next live
-            // I-frame. Either way FFmpeg never starts on a P-frame.
-            job.SentKeyframe = false;
-            int startIdx = -1;
-            for (int i = job.PendingVideo.Count - 1; i >= 0; i--)
-                if (StartsGop(job.PendingVideo[i])) { startIdx = i; break; }
-            if (startIdx >= 0)
-            {
-                for (int i = startIdx; i < job.PendingVideo.Count; i++)
-                    try { job.Stdin.Write(job.PendingVideo[i], 0, job.PendingVideo[i].Length); } catch { }
-                try { job.Stdin.Flush(); } catch { }
-                job.FramesIn += job.PendingVideo.Count - startIdx;
-                job.SentKeyframe = true;
-            }
+            // flush buffered video
+            foreach (var v in job.PendingVideo) { try { job.Stdin.Write(v, 0, v.Length); } catch { } }
+            try { job.Stdin.Flush(); } catch { }
+            job.FramesIn += job.PendingVideo.Count;
             job.PendingVideo.Clear();
             if (!withAudio) job.PendingAudio.Clear();
         }
