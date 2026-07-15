@@ -218,9 +218,8 @@ public class FfmpegTranscoder
             }
 
             // Video path is the known-good config (produces continuous video).
-            // -max_interleave_delta 0 keeps the muxer flushing instead of waiting,
-            // and the audio is fed on a separate non-blocking writer (see below) so
-            // it can never stall the video pipe.
+            // The audio is fed on a separate non-blocking writer (see below) so it
+            // can never stall the video pipe.
             string videoIn = $"-fflags +genpts -framerate 25 -f {codecFmt} -i pipe:0 ";
 
             // Detect the audio codec from the buffered frames. The default is G.711
@@ -241,10 +240,17 @@ public class FfmpegTranscoder
                 ? "-map 0:v:0 -map 1:a:0 -c:a aac -b:a 64k -ar 44100 -filter:a aresample=async=1000 "
                 : "-map 0:v:0 -an ";
 
+            // -max_interleave_delta: max time the muxer buffers to interleave A/V.
+            // 0 means "buffer indefinitely until every stream has a packet" — with
+            // live audio that trickles in behind the burst-flushed video, that makes
+            // the muxer wait forever and write NOTHING (the "no HLS output in 6s"
+            // stall). A small positive value (0.1s) flushes video promptly and still
+            // interleaves audio when it's on time. Harmless for the video-only path
+            // (single stream never needs interleaving).
             string args =
                 "-hide_banner -loglevel warning " + videoIn + audioIn +
                 "-c:v libx264 -preset ultrafast -tune zerolatency -pix_fmt yuv420p -g 25 " +
-                "-max_interleave_delta 0 -muxpreload 0 -muxdelay 0 " + maps +
+                "-max_interleave_delta 100000 -max_muxing_queue_size 1024 -muxpreload 0 -muxdelay 0 " + maps +
                 "-f hls -hls_time 1 -hls_list_size 6 " +
                 "-hls_flags delete_segments+omit_endlist+independent_segments " +
                 $"-hls_segment_type mpegts -hls_segment_filename \"{seg}\" \"{m3u8}\"";
