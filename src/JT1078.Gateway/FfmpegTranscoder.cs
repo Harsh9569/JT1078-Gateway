@@ -145,6 +145,17 @@ public class FfmpegTranscoder
         return null;
     }
 
+    // Detect ADTS AAC audio: frames begin with a 12-bit sync word 0xFFF
+    // (byte0 == 0xFF, high nibble of byte1 == 0xF). Raw G.711 A-law has no sync
+    // pattern, so absence of the sync word means the configured default (alaw).
+    private static bool DetectAac(IEnumerable<byte[]> audioFrames)
+    {
+        foreach (var a in audioFrames)
+            if (a != null && a.Length >= 2 && a[0] == 0xFF && (a[1] & 0xF0) == 0xF0)
+                return true;
+        return false;
+    }
+
     private Job GetOrCreate(string key)
     {
         return _jobs.GetOrAdd(key, k =>
@@ -211,8 +222,20 @@ public class FfmpegTranscoder
             // and the audio is fed on a separate non-blocking writer (see below) so
             // it can never stall the video pipe.
             string videoIn = $"-fflags +genpts -framerate 25 -f {codecFmt} -i pipe:0 ";
+
+            // Detect the audio codec from the buffered frames. The default is G.711
+            // A-law (raw samples), but some cameras — including this JT/T 808-2019
+            // unit — send AAC in ADTS framing (0xFFFx sync word). Feeding AAC bytes
+            // to "-f alaw" makes FFmpeg decode garbage -> broken audio timestamps ->
+            // the HLS muxer stalls and never writes a segment (the "no HLS output in
+            // 6s" fallback). For ADTS AAC the frame header carries sample-rate and
+            // channels, so we must NOT force -ar/-ac on the input.
+            bool audioIsAac = withAudio && DetectAac(job.PendingAudio);
+            string audioFmt = audioIsAac ? "aac" : _audioFmt;
             string audioIn = withAudio
-                ? $"-thread_queue_size 1024 -f {_audioFmt} -ar {_audioRate} -ac 1 -i tcp://127.0.0.1:{audioPort} "
+                ? (audioIsAac
+                    ? $"-thread_queue_size 1024 -f aac -i tcp://127.0.0.1:{audioPort} "
+                    : $"-thread_queue_size 1024 -f {_audioFmt} -ar {_audioRate} -ac 1 -i tcp://127.0.0.1:{audioPort} ")
                 : "";
             string maps = withAudio
                 ? "-map 0:v:0 -map 1:a:0 -c:a aac -b:a 64k -ar 44100 -filter:a aresample=async=1000 "
@@ -304,8 +327,8 @@ public class FfmpegTranscoder
                 catch { }
             });
 
-            _log.LogInformation("[FFMPEG] {k} started codec={c} withAudio={a} (in {f}/{r}Hz, tcp:{p}) -> {m3u8}",
-                job.Key, codecFmt, withAudio, _audioFmt, _audioRate, audioPort, m3u8);
+            _log.LogInformation("[FFMPEG] {k} started codec={c} withAudio={a} audioFmt={af} (tcp:{p}) -> {m3u8}",
+                job.Key, codecFmt, withAudio, withAudio ? audioFmt : "-", audioPort, m3u8);
 
             // Watchdog: some channels (e.g. higher-res streams) let ffmpeg sit
             // interleaving audio+video forever without ever flushing a segment.
