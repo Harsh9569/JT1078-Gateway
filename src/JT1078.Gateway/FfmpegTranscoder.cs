@@ -217,16 +217,21 @@ public class FfmpegTranscoder
                 }
             }
 
-            // H.265 (old cameras) keep the known-good fixed-rate config, unchanged.
-            // H.264 (this 2019 unit) sends ~12 fps, so the fixed -framerate 25 makes
-            // its clock drift — growing the latency and, because audio then rides a
-            // different clock, stopping the HLS muxer from aligning A/V within the 6s
-            // watchdog (the audio "stall"). For H.264, timestamp video by real
-            // ARRIVAL time (wall clock) so it shares one real-time reference with the
-            // AAC audio below: playback tracks live and audio stops falling back.
+            // Feed rate: a fixed -framerate 25 drifts badly when a camera sends fewer
+            // fps (this 2019 H.264 unit sends ~12), which grows the latency AND, since
+            // the audio then rides a faster/slower clock, stops the HLS muxer aligning
+            // A/V within the 6s watchdog. Estimate the REAL rate from the frames
+            // buffered during detection so the video clock tracks real time (and the
+            // audio clock). Keep genpts+framerate (assigns clean per-frame timestamps,
+            // so the burst-flushed startup buffer is fine — unlike wall-clock, which
+            // gave every buffered frame the same stamp and produced no output at all).
+            // Old H.265 cameras keep the proven fixed 25.
+            int estFps = job.PendingVideo.Count >= 8
+                ? Math.Clamp((int)Math.Round(job.PendingVideo.Count / (DecideMs / 1000.0)), 8, 30)
+                : 15;
             string videoIn = useHevc
                 ? $"-fflags +genpts -framerate 25 -f hevc -i pipe:0 "
-                : $"-use_wallclock_as_timestamps 1 -fflags +genpts -f h264 -i pipe:0 ";
+                : $"-fflags +genpts -framerate {estFps} -f h264 -i pipe:0 ";
 
             // Detect the audio codec from the buffered frames. The default is G.711
             // A-law (raw samples), but some cameras — including this JT/T 808-2019
@@ -243,13 +248,14 @@ public class FfmpegTranscoder
             // Raw A-law needs no analysis (fully specified by -ar/-ac), which is
             // why alaw cameras never stalled. Force a tiny probe so the muxer starts
             // immediately and audio + video interleave from the first frames.
-            // AAC audio: share the SAME wall-clock reference as the H.264 video above
-            // (so A/V align and the muxer stops stalling), plus -analyzeduration 0 so
-            // FFmpeg doesn't spend up to 5s probing the AAC stream before muxing.
-            // A-law audio (old cameras) is left exactly as before — it already works.
+            // AAC audio: -fflags +genpts puts it on the same 0-based clock as the
+            // genpts video above (now that video runs at the real frame rate, the two
+            // clocks track together and interleave). -analyzeduration 0 -probesize
+            // small so FFmpeg doesn't spend seconds probing the AAC stream before it
+            // starts muxing. A-law audio (old cameras) is left exactly as before.
             string audioIn = withAudio
                 ? (audioIsAac
-                    ? $"-use_wallclock_as_timestamps 1 -analyzeduration 0 -probesize 65536 -thread_queue_size 1024 -f aac -i tcp://127.0.0.1:{audioPort} "
+                    ? $"-fflags +genpts -analyzeduration 0 -probesize 4096 -thread_queue_size 1024 -f aac -i tcp://127.0.0.1:{audioPort} "
                     : $"-thread_queue_size 1024 -f {_audioFmt} -ar {_audioRate} -ac 1 -i tcp://127.0.0.1:{audioPort} ")
                 : "";
             string maps = withAudio
@@ -349,8 +355,8 @@ public class FfmpegTranscoder
                 catch { }
             });
 
-            _log.LogInformation("[FFMPEG] {k} started codec={c} withAudio={a} audioFmt={af} (tcp:{p}) -> {m3u8}",
-                job.Key, codecFmt, withAudio, withAudio ? audioFmt : "-", audioPort, m3u8);
+            _log.LogInformation("[FFMPEG] {k} started codec={c} fps={fps} withAudio={a} audioFmt={af} (tcp:{p}) -> {m3u8}",
+                job.Key, codecFmt, useHevc ? 25 : estFps, withAudio, withAudio ? audioFmt : "-", audioPort, m3u8);
 
             // Watchdog: some channels (e.g. higher-res streams) let ffmpeg sit
             // interleaving audio+video forever without ever flushing a segment.
