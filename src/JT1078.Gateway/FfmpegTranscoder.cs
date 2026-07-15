@@ -231,10 +231,17 @@ public class FfmpegTranscoder
             // channels, so we must NOT force -ar/-ac on the input.
             bool audioIsAac = withAudio && DetectAac(job.PendingAudio);
             string audioFmt = audioIsAac ? "aac" : _audioFmt;
+            // -analyzeduration 0 -probesize: FFmpeg otherwise spends up to its
+            // default 5s analyzing an AAC (ADTS) input before it starts muxing —
+            // which blows past the 6s watchdog and looks like an audio "stall".
+            // Raw A-law needs no analysis (fully specified by -ar/-ac), which is
+            // why alaw cameras never stalled. Force a tiny probe so the muxer starts
+            // immediately and audio + video interleave from the first frames.
+            string audioProbe = "-analyzeduration 0 -probesize 65536 ";
             string audioIn = withAudio
                 ? (audioIsAac
-                    ? $"-thread_queue_size 1024 -f aac -i tcp://127.0.0.1:{audioPort} "
-                    : $"-thread_queue_size 1024 -f {_audioFmt} -ar {_audioRate} -ac 1 -i tcp://127.0.0.1:{audioPort} ")
+                    ? $"{audioProbe}-thread_queue_size 1024 -f aac -i tcp://127.0.0.1:{audioPort} "
+                    : $"{audioProbe}-thread_queue_size 1024 -f {_audioFmt} -ar {_audioRate} -ac 1 -i tcp://127.0.0.1:{audioPort} ")
                 : "";
             string maps = withAudio
                 ? "-map 0:v:0 -map 1:a:0 -c:a aac -b:a 64k -ar 44100 -filter:a aresample=async=1000 "
