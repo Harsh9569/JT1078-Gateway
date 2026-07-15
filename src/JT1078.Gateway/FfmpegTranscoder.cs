@@ -217,10 +217,16 @@ public class FfmpegTranscoder
                 }
             }
 
-            // Video path is the known-good config (produces continuous video).
-            // The audio is fed on a separate non-blocking writer (see below) so it
-            // can never stall the video pipe.
-            string videoIn = $"-fflags +genpts -framerate 25 -f {codecFmt} -i pipe:0 ";
+            // H.265 (old cameras) keep the known-good fixed-rate config, unchanged.
+            // H.264 (this 2019 unit) sends ~12 fps, so the fixed -framerate 25 makes
+            // its clock drift — growing the latency and, because audio then rides a
+            // different clock, stopping the HLS muxer from aligning A/V within the 6s
+            // watchdog (the audio "stall"). For H.264, timestamp video by real
+            // ARRIVAL time (wall clock) so it shares one real-time reference with the
+            // AAC audio below: playback tracks live and audio stops falling back.
+            string videoIn = useHevc
+                ? $"-fflags +genpts -framerate 25 -f hevc -i pipe:0 "
+                : $"-use_wallclock_as_timestamps 1 -fflags +genpts -f h264 -i pipe:0 ";
 
             // Detect the audio codec from the buffered frames. The default is G.711
             // A-law (raw samples), but some cameras — including this JT/T 808-2019
@@ -237,11 +243,14 @@ public class FfmpegTranscoder
             // Raw A-law needs no analysis (fully specified by -ar/-ac), which is
             // why alaw cameras never stalled. Force a tiny probe so the muxer starts
             // immediately and audio + video interleave from the first frames.
-            string audioProbe = "-analyzeduration 0 -probesize 65536 ";
+            // AAC audio: share the SAME wall-clock reference as the H.264 video above
+            // (so A/V align and the muxer stops stalling), plus -analyzeduration 0 so
+            // FFmpeg doesn't spend up to 5s probing the AAC stream before muxing.
+            // A-law audio (old cameras) is left exactly as before — it already works.
             string audioIn = withAudio
                 ? (audioIsAac
-                    ? $"{audioProbe}-thread_queue_size 1024 -f aac -i tcp://127.0.0.1:{audioPort} "
-                    : $"{audioProbe}-thread_queue_size 1024 -f {_audioFmt} -ar {_audioRate} -ac 1 -i tcp://127.0.0.1:{audioPort} ")
+                    ? $"-use_wallclock_as_timestamps 1 -analyzeduration 0 -probesize 65536 -thread_queue_size 1024 -f aac -i tcp://127.0.0.1:{audioPort} "
+                    : $"-thread_queue_size 1024 -f {_audioFmt} -ar {_audioRate} -ac 1 -i tcp://127.0.0.1:{audioPort} ")
                 : "";
             string maps = withAudio
                 ? "-map 0:v:0 -map 1:a:0 -c:a aac -b:a 64k -ar 44100 -filter:a aresample=async=1000 "
