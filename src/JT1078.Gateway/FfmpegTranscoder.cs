@@ -185,6 +185,18 @@ public class FfmpegTranscoder
             bool useHevc = job.IsHevc ?? true;
             string codecFmt = useHevc ? "hevc" : "h264";
 
+            // AAC audio muxed live into HLS currently stalls the muxer (the "no HLS
+            // output in 6s" watchdog fallback), which under connection churn keeps the
+            // channel blank. Until that mux is solved, skip audio for AAC cameras and
+            // go straight to reliable video-only — video shows immediately, no 6s
+            // stall. A-law cameras (the older units) keep working audio untouched.
+            if (withAudio && DetectAac(job.PendingAudio))
+            {
+                withAudio = false;
+                _log.LogInformation("[FFMPEG] {k} AAC audio not yet supported in HLS mux — video-only for now", job.Key);
+            }
+            job.WithAudio = withAudio;
+
             string safe = job.Key.Replace("/", "_").Replace("\\", "_").Replace("..", "_");
             string m3u8 = Path.Combine(_outDir, safe + ".m3u8");
             string seg = Path.Combine(_outDir, safe + "_%03d.ts");
