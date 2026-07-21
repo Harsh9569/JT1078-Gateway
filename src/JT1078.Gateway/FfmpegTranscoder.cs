@@ -65,6 +65,14 @@ public class FfmpegTranscoder
         _audioFmt = audioFmt;
         _audioRate = audioRate;
         Directory.CreateDirectory(_outDir);
+        // Clear any HLS left over from a previous run so a restart never serves a
+        // stale (frozen) frame — the browser sees "no stream" until a live one starts.
+        try
+        {
+            foreach (var f in Directory.GetFiles(_outDir, "*.ts")) File.Delete(f);
+            foreach (var f in Directory.GetFiles(_outDir, "*.m3u8")) File.Delete(f);
+        }
+        catch { }
     }
 
     public IEnumerable<string> ActiveKeys() => _jobs.Keys;
@@ -443,6 +451,18 @@ public class FfmpegTranscoder
         try { job.AudioListener?.Stop(); } catch { }
         try { if (job.Proc != null && !job.Proc.HasExited) job.Proc.Kill(true); } catch { }
         _jobs.TryRemove(job.Key, out _);
+        // Remove this stream's HLS so a genuinely stopped stream doesn't leave a
+        // frozen last frame on screen — the browser gets "no stream" and can show a
+        // reconnecting/offline state instead. (Quick reconnects use seamless takeover
+        // and never reach here, so this won't flicker during brief churn.)
+        try
+        {
+            string safe = job.Key.Replace("/", "_").Replace("\\", "_").Replace("..", "_");
+            foreach (var f in Directory.GetFiles(_outDir, safe + "_*.ts")) File.Delete(f);
+            string m3u8 = Path.Combine(_outDir, safe + ".m3u8");
+            if (File.Exists(m3u8)) File.Delete(m3u8);
+        }
+        catch { }
         _log.LogInformation("[FFMPEG] {k} stopped (video={v} audio={a})", job.Key, job.FramesIn, job.AudioIn);
     }
 }
